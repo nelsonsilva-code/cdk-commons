@@ -1,6 +1,7 @@
-export * from './domain';
-export * from './ecr';
-export * from './fargate';
-export * from './rds';
-export * from './sqs';
-export * from './vpc';
+import CustomDomain from "./domain";
+import CustomEcr from "./ecr";
+import CustomRds from "./rds";
+import CustomSqs from "./sqs"
+import CustomVpcStack from "./vpc";
+
+export {CustomDomain, CustomEcr, CustomRds, CustomVpcStack, CustomSqs}

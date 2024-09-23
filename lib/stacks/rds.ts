@@ -1,83 +1,125 @@
-import * as cdk from 'aws-cdk-lib';
 import {Construct} from 'constructs';
-import {Aspects, Duration, Stack, StackProps} from "aws-cdk-lib";
-import {
-    Cluster,
-    CpuArchitecture, EcrImage, FargateService,
-    FargateTaskDefinition, IBaseService,
-    LogDrivers,
-    OperatingSystemFamily
-} from "aws-cdk-lib/aws-ecs";
-
+import {Duration, Stack, StackProps} from "aws-cdk-lib";
 import {
     InstanceClass,
     InstanceSize,
     InstanceType,
-    IVpc,
-    Peer,
-    Port,
-    SecurityGroup,
+    IVpc, SecurityGroup,
     SubnetType
 } from "aws-cdk-lib/aws-ec2";
-
-import {
-    ApplicationProtocol,
-    ApplicationProtocolVersion
-} from "aws-cdk-lib/aws-elasticloadbalancingv2";
-import {Effect, PolicyStatement} from "aws-cdk-lib/aws-iam";
-import { CfnProxyCredentials, Domain, VwsIngressV2} from "@vw-sre/vws-cdk";
-import {Certificate, CertificateValidation} from "aws-cdk-lib/aws-certificatemanager";
-import {ApplicationTargetGroup} from 'aws-cdk-lib/aws-elasticloadbalancingv2';
-import {Microservice} from "../interfaces/microservice-interface";
-import {EnableObjectOwnership} from "../shared/bucket-aspect";
-import {IRepository} from "aws-cdk-lib/aws-ecr";
+import {Microservice} from "../interfaces";
 import {
     AuroraMysqlEngineVersion,
-    Credentials, DatabaseCluster,
+    ClusterInstance,
+    Credentials,
+    DatabaseCluster,
     DatabaseClusterEngine,
-    IDatabaseInstance,
-    ParameterGroup
+    DatabaseClusterFromSnapshot,
+    DatabaseInstance,
+    DatabaseInstanceEngine,
+    IClusterEngine,
+    IEngine,
+    ParameterGroup, PostgresEngineVersion, SnapshotCredentials
 } from "aws-cdk-lib/aws-rds";
-import {Key, KeyUsage} from "aws-cdk-lib/aws-kms";
-import {Secret} from "aws-cdk-lib/aws-secretsmanager";
+import {IKey, Key, KeyUsage} from "aws-cdk-lib/aws-kms";
+import {EnvironmentStage} from "../interfaces";
+import {DatabaseEngine} from "../types";
+import {StringParameter} from "aws-cdk-lib/aws-ssm";
+import {ISecret} from "aws-cdk-lib/aws-secretsmanager";
 
-
-
-interface RdsProps {
-    taskDesiredCount: number;
-    databaseName: string,
-    stackProps: StackProps,
-    stage: "prod" | "prelive" | "develop",
-    vpc: IVpc,
-    ecrRepo:IRepository,
-    profile: string
-    databaseInstanceSize: InstanceSize
+interface CustomRdsProps extends StackProps{
+    databaseName: string;
+    stackProps: StackProps;
+    stackName: string;
+    microservice: Microservice;
+    stage: EnvironmentStage['stage'];
+    vpc: IVpc;
+    /**
+     * What class and generation of instance to use.
+     * E.g.: T3, T4, R4.
+     * @see {@link https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.DBInstanceClass.html} for more info
+     */
+    databaseInstanceClass: InstanceClass;
+    /**
+     * Prices (USD/month) and specs for instances are as follows:
+     * - Micro - 57.23 USD (1vCPUs - 1GB)
+     * - Small - 83.51 USD (1vCPUs - 2GB)
+     * - Medium - 137.53 USD (2vCPUs - 4GB)
+     */
+    databaseInstanceSize: InstanceSize;
+    databaseEngine: DatabaseEngine;
+    env: {account: string, region: string},
+    deletionProtection?: boolean;
+    restoreFromSnapshot?: {
+        snapshotIdentifier: string,
+        databaseUsername: string,
+    }
 }
 
-export class CustomRds extends Stack {
-    constructor(scope: Construct, microservice: Microservice, proxyCredentials: CfnProxyCredentials, props: RdsProps) {
+export default class CustomRds extends Stack {
+    public readonly database;
 
-        //----------VARIABLES
-        const stage = props.stage;
-        const databaseName = props.databaseName;
-        const vpc = props.vpc;
-        const databaseInstanceSize = props.databaseInstanceSize;
-        //----------VARIABLES
+    public readonly credentials!: ISecret;
 
-        props.stackProps = {
-            ...props.stackProps,
-            stackName: `${stage.toUpperCase()}${microservice.name}RdsStack`
-        }
+    public readonly securityGroup: SecurityGroup;
 
-        super(scope, props.stackProps.stackName, props.stackProps);
+    private readonly secretsEncryptionKey: IKey
+    constructor(scope: Construct, id: string , props: CustomRdsProps) {
+        super(scope, id, props);
 
+        this.checkForErrors(props)
 
-        const secretsEncryptionKey = Key.fromLookup(this, 'EncryptionKey', {
+        this.secretsEncryptionKey = Key.fromLookup(this, 'SecretsEncryptionKey', {
             aliasName: 'alias/SecretsEncryptionKey',
         });
 
+        const databaseEncryptionKey = new Key(this, 'RDSEncryptionKey', {
+            pendingWindow: Duration.days(10),
+            keyUsage: KeyUsage.ENCRYPT_DECRYPT,
+            enableKeyRotation: true,
+            alias: `${props.stage}-${props.microservice.name}-DatabaseEncryptionKey`,
+            description: 'VW managed key used to encrypt and decrypt database instances',
+        });
+
+        this.securityGroup = new SecurityGroup(this, 'SecurityGroup', {
+            securityGroupName: `${props.microservice.name}-${props.stage}-database-sg-default`,
+            vpc: props.vpc
+        });
+
+        new StringParameter(this, 'DatabaseSecurityGroupParameter', {
+            parameterName: `/${props.stage.toLowerCase()}/${props.microservice.name.toLowerCase()}/database-security-group`,
+            stringValue: this.securityGroup.securityGroupId
+        })
+
+        if (props.databaseEngine === 'Postgres') {
+
+            this.database = this.createPostgresDatabase(props, databaseEncryptionKey)
+
+        } else {
+
+            const engine = DatabaseClusterEngine.auroraMysql({
+                version: AuroraMysqlEngineVersion.VER_3_06_0,
+            });
+            const clusterEngine = DatabaseClusterEngine.auroraMysql({
+                version: AuroraMysqlEngineVersion.VER_3_06_0,
+            });
+
+            this.database = props.restoreFromSnapshot ? this.createDatabaseClusterFromSnapshot(props, databaseEncryptionKey, engine, clusterEngine) : this.createDatabaseCluster(props, databaseEncryptionKey, engine, clusterEngine)
+
+            this.credentials = this.database.secret!
+        }
+
+    }
+
+    private createDatabaseCluster(props: CustomRdsProps, databaseEncryptionKey: Key, engine: IEngine, clusterEngine: IClusterEngine) {
+
+        const credentials = Credentials.fromUsername(`${props.stage}DatabaseMasterUser`, {
+            secretName: `${props.stage}/${props.microservice.name.toLowerCase()}/database-credentials`,
+            encryptionKey: this.secretsEncryptionKey,
+        });
+
         const databaseParameterGroup = new ParameterGroup(this, 'ParameterGroup', {
-            engine: DatabaseClusterEngine.auroraMysql({ version: AuroraMysqlEngineVersion.VER_2_11_2 }),
+            engine: engine,
             parameters: {
                 character_set_client: 'utf8',
                 character_set_connection: 'utf8',
@@ -88,43 +130,132 @@ export class CustomRds extends Stack {
             },
         });
 
-        const databaseEncryptionKey = new Key(this, 'EncryptionKey', {
-            pendingWindow: Duration.days(10),
-            keyUsage: KeyUsage.ENCRYPT_DECRYPT,
-            enableKeyRotation: true,
-            alias: `${stage}-PdeMail-DatabaseEncryptionKey`,
-            description: 'VW managed key used to encrypt and decrypt pde mail database instance',
-        });
-
-        const credentials = Credentials.fromUsername(`${stage}MailDatabaseMasterUser`, {
-            secretName: `${stage}/pde-mail/database-credentials`,
-            encryptionKey: secretsEncryptionKey,
-        });
-
-        const databaseClusterProps = {
-            engine: DatabaseClusterEngine.auroraMysql({ version: AuroraMysqlEngineVersion.VER_2_11_2 }),
-            defaultDatabaseName: databaseName,
-            deletionProtection: true,
+        const databaseCluster = new DatabaseCluster(this, 'Database', {
+            engine: clusterEngine,
+            defaultDatabaseName: `${props.databaseName}Database`,
+            deletionProtection: props.deletionProtection ?? true,
             cloudwatchLogsExports: ['error', 'general', 'slowquery', 'audit'],
             iamAuthentication: true,
-            instances: 2,
             backup: {
                 retention: Duration.days(7),
             },
-            instanceProps: {
-                vpc,
-                instanceType: InstanceType.of(InstanceClass.T2, databaseInstanceSize),
-                vpcSubnets: {
-                    subnetType: SubnetType.PRIVATE_ISOLATED,
-                },
+            vpc: props.vpc,
+            vpcSubnets: {
+                subnetType: SubnetType.PRIVATE_ISOLATED,
             },
+            writer: ClusterInstance.provisioned('WriterInstance', {
+                instanceType: InstanceType.of(props.databaseInstanceClass, props.databaseInstanceSize),
+            }),
+            readers: [
+                ClusterInstance.provisioned('ReaderInstance', {
+                    instanceType: InstanceType.of(props.databaseInstanceClass, props.databaseInstanceSize),
+                }),
+            ],
             storageEncrypted: true,
             storageEncryptionKey: databaseEncryptionKey,
             parameterGroup: databaseParameterGroup,
-            credentials,
-        };
+            credentials: credentials,
+            securityGroups: [this.securityGroup]
+        })
 
-        new DatabaseCluster(this, 'Database', databaseClusterProps)
+        new StringParameter(this, 'DatabaseClusterParameter', {
+            parameterName: `/${props.stage.toLowerCase()}/${props.microservice.name.toLowerCase()}/mysql-database-cluster-identifier`,
+            stringValue: databaseCluster.clusterIdentifier
+        })
+
+        return databaseCluster
+
+    }
+
+    private createPostgresDatabase(props: CustomRdsProps, databaseEncryptionKey: Key) {
+
+        const credentials = Credentials.fromUsername(`${props.stage}DatabaseMasterUser`, {
+            secretName: `${props.stage}/${props.microservice.name.toLowerCase()}/database-credentials`,
+            encryptionKey: this.secretsEncryptionKey,
+        });
+
+        const databaseInstance = new DatabaseInstance(this, 'Database', {
+            vpc: props.vpc,
+            vpcSubnets: {
+                subnetType: SubnetType.PRIVATE_ISOLATED,
+            },
+            instanceType: InstanceType.of(props.databaseInstanceClass, props.databaseInstanceSize),
+            engine: DatabaseInstanceEngine.postgres({ version: PostgresEngineVersion.VER_16_3 }),
+            credentials: credentials,
+            backupRetention: Duration.days(7),
+            deleteAutomatedBackups: false,
+            deletionProtection: props.deletionProtection ?? true,
+            cloudwatchLogsExports: ['postgresql'],
+            storageEncrypted: true,
+            storageEncryptionKey: databaseEncryptionKey,
+            iamAuthentication: true,
+            securityGroups: [this.securityGroup],
+        });
+
+        new StringParameter(this, 'DatabaseInstanceParameter', {
+            parameterName: `/${props.stage.toLowerCase()}/${props.microservice.name.toLowerCase()}/postgres-database-instance-identifier`,
+            stringValue: databaseInstance.instanceIdentifier
+        })
+
+        return databaseInstance
+    }
+    private createDatabaseClusterFromSnapshot(props: CustomRdsProps, databaseEncryptionKey: Key, engine: IEngine, clusterEngine: IClusterEngine) {
+        const databaseParameterGroup = new ParameterGroup(this, 'ParameterGroup', {
+            engine: engine,
+            parameters: {
+                character_set_client: 'utf8',
+                character_set_connection: 'utf8',
+                character_set_database: 'utf8',
+                character_set_results: 'utf8',
+                character_set_server: 'utf8',
+                collation_connection: 'utf8_unicode_ci',
+            },
+        });
+
+        const databaseCluster = new DatabaseClusterFromSnapshot(this, 'Database', {
+            engine: clusterEngine,
+            defaultDatabaseName: `${props.databaseName}Database`,
+            deletionProtection: props.deletionProtection ?? true,
+            cloudwatchLogsExports: ['error', 'general', 'slowquery', 'audit'],
+            iamAuthentication: true,
+            backup: {
+                retention: Duration.days(7),
+            },
+            vpc: props.vpc,
+            vpcSubnets: {
+                subnetType: SubnetType.PRIVATE_ISOLATED,
+            },
+            writer: ClusterInstance.provisioned('WriterInstance', {
+                instanceType: InstanceType.of(props.databaseInstanceClass, props.databaseInstanceSize),
+            }),
+            readers: [
+                ClusterInstance.provisioned('ReaderInstance', {
+                    instanceType: InstanceType.of(props.databaseInstanceClass, props.databaseInstanceSize),
+                }),
+            ],
+            storageEncrypted: true,
+            storageEncryptionKey: databaseEncryptionKey,
+            parameterGroup: databaseParameterGroup,
+            snapshotIdentifier: props.restoreFromSnapshot!.snapshotIdentifier,
+            securityGroups: [this.securityGroup],
+            snapshotCredentials: SnapshotCredentials.fromGeneratedSecret(props.restoreFromSnapshot!.databaseUsername, {
+                encryptionKey: this.secretsEncryptionKey
+            })
+        })
+
+        new StringParameter(this, 'DatabaseClusterParameter', {
+            parameterName: `/${props.stage.toLowerCase()}/${props.microservice.name.toLowerCase()}/mysql-database-cluster-identifier`,
+            stringValue: databaseCluster.clusterIdentifier
+        })
+
+        return databaseCluster
+    }
+
+    private checkForErrors(props: CustomRdsProps) {
+
+        if (props.restoreFromSnapshot && props.databaseEngine === 'Postgres') {
+            throw new Error('Restore from snapshot is currently not supported for Postgres instances')
+        }
 
     }
 }

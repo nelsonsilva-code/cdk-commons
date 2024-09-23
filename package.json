@@ -1,33 +1,41 @@
 {
-  "name": "@pre-delivery-enrolment/cdk-commons",
-  "version": "0.1.0",
-  "main": "lib/index.ts",
-  "bin": {
-    "cdk": "bin/cdk.ts"
-  },
+  "name": "@nelsonsilva-code/cdk-commons",
+  "version": "1.0.0",
+  "description": "CDK package containing common CDK code for Junior Academy 2024/2025",
+  "type": "commonjs",
+  "keywords": [
+    "cdk"
+  ],
+  "author": "PDE SRE Team",
+  "homepage": "https://github.com/nelsonsilva-code/cdk-commons#readme.md",
+  "license": "ISC",
+  "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --project tsconfig.build.json",
     "watch": "tsc -w",
     "test": "jest",
-    "cdk": "cdk",
-    "cdk_deploy": "cdk deploy --all"
+    "pack": "./scripts/reload.sh && npm test && npm run build && npm pack --pack-destination ./local-pack",
+    "pack-notests": "./scripts/reload.sh && npm run build && npm pack --pack-destination ./local-pack",
+    "cdk": "cdk"
+  },
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "commonjs"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/pre-delivery-enrolment/cdk-commons.git"
+    "url": "git+https://github.com/nelsonsilva-code/cdk-commons.git"
   },
-  "license": "ISC",
-  "keywords": ["aws", "cdk", "typescript"],
-  "description": "A description of your CDK package",
-  "author": "PDE SRE Team",
-  "engines": {
-    "node": ">=14.0.0",
-    "npm": ">=7.0.0"
+  "peerDependencies": {
+    "aws-cdk-lib": "2.157.0",
+    "constructs": "10.3.0",
+    "@aws-sdk/client-secrets-manager": "3.649.0"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.12",
     "@types/node": "^18.0.0",
     "@typescript-eslint/eslint-plugin": "^5.30.0",
     "@typescript-eslint/parser": "^5.30.0",
@@ -37,16 +45,18 @@
     "eslint-plugin-cdk": "^1.8.0",
     "eslint-plugin-import": "^2.23.4",
     "eslint-plugin-jest": "^26.5.3",
-    "jest": "^28.1.1",
-    "ts-node": "^10.8.1",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.4",
+    "ts-node": "10.9.2",
     "typescript": "^4.7.4"
   },
   "dependencies": {
     "@vw-sre/vws-cdk": "^2.8.1",
-    "aws-cdk": "^2.82.0",
-    "aws-cdk-lib": "^2.82.0",
-    "cdk-assets": "^2.82.0",
-    "constructs": "^10.2.44",
+    "aws-cdk": "^2.131.0",
+    "cdk-assets": "^2.131.0",
+    "aws-cdk-lib": "2.157.0",
+    "constructs": "10.3.0",
+    "@aws-sdk/client-secrets-manager": "3.649.0",
     "source-map-support": "^0.5.16"
   }
 }

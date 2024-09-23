@@ -1,23 +1,29 @@
 import {Construct} from "constructs";
 import {IRepository, Repository} from "aws-cdk-lib/aws-ecr";
 import {RemovalPolicy, Stack, StackProps} from "aws-cdk-lib";
-import {Microservice} from "../interfaces/microservice-interface";
+import {Microservice} from "../interfaces";
 
-export class CustomEcr extends Stack {
-    public readonly repo: IRepository;
+interface CustomEcrProps extends StackProps {
+    microservice: Microservice,
+    suffix: string,
+    stackName: string,
+    env: {account: string, region: string}
+}
 
-    constructor(app: Construct, microservice: Microservice, suffix: string,  props?: StackProps) {
-        props = {
-            ...props,
-            stackName: `${microservice.name}${suffix}EcrStack`
-        }
-        super(app, props.stackName, props);
-        this.repo = new Repository(this, microservice.name.toLowerCase()+suffix, {
-            repositoryName: `${microservice.name.toLowerCase()}_${suffix}`,
+export default class CustomEcr extends Stack {
+    public readonly ecrRepo: IRepository;
+
+    constructor(app: Construct, id: string,  props: CustomEcrProps) {
+        super(app, id, props);
+
+        this.ecrRepo = new Repository(this, 'ECR-Repository', {
+            repositoryName: `${props.microservice.name.toLowerCase()}${props.suffix}`,
             imageScanOnPush: false,
             removalPolicy: RemovalPolicy.DESTROY,
+            emptyOnDelete: true,
+            lifecycleRules: [{
+                maxImageCount: 25,
+            }]
         });
-
     }
-
 }
